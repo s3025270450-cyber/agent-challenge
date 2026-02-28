@@ -14,13 +14,12 @@ from openai import OpenAI
 # ==========================================
 # 配置区域
 # ==========================================
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
-BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-# 允许从环境变量覆盖模型名称，默认为 deepseek-chat
-MODEL_NAME = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
+API_KEY = os.getenv("DASHSCOPE_API_KEY")  # 改为阿里云
+BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+MODEL_NAME = os.getenv("DASHSCOPE_MODEL_NAME", "qwen-plus")
 
 if not API_KEY:
-    print("❌ Error: 请设置环境变量 DEEPSEEK_API_KEY")
+    print("❌ Error: 请设置环境变量 DASHSCOPE_API_KEY")
     sys.exit(1)
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
@@ -35,14 +34,20 @@ class LongArticleAgent:
         """Step 1: 生成章节大纲"""
         print(f"📋 正在规划主题: {self.topic}...")
         
-        # TODO: 编写 Prompt 让模型生成纯 JSON 列表
-        prompt = f"请为主题《{self.topic}》生成一个包含3个章节的大纲..."
+        # 改进的 Prompt
+        prompt = f"""
+        请为主题《{self.topic}》生成一个包含3个章节的大纲。
+        每个章节的标题应简洁明了，能够概括该部分的核心内容。
+        输出格式必须是严格的JSON数组，例如：
+        ["第一章：引言", "第二章：技术原理", "第三章：未来展望"]
+        不要包含任何其他解释或文本。
+        """
         
         try:
             response = client.chat.completions.create(
-                model=MODEL_NAME,  # 使用配置的模型名
+                model=MODEL_NAME,
                 messages=[
-                    {"role": "system", "content": "你是一个专业的写作规划师，只输出 JSON Array。"},
+                    {"role": "system", "content": "你是一个专业的写作规划师，只输出JSON数组，不要输出任何其他内容。"},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -50,20 +55,36 @@ class LongArticleAgent:
             )
             content = response.choices[0].message.content
             
-            # TODO: 解析返回的 JSON 内容到 self.outline
+            # 清理可能的 Markdown 代码块（如 ```json ... ```）
+            content = content.strip()
+            if content.startswith("```"):
+                # 移除开头和结尾的 ```
+                lines = content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+            
+            # 解析 JSON
             data = json.loads(content)
             
-            # 简单的容错逻辑示例（候选人需要完善）
+            # 处理返回的数据：可能直接是列表，也可能是包含列表的字典
             if isinstance(data, list):
                 self.outline = data
             elif isinstance(data, dict):
-                for key, value in data.items():
+                # 尝试找到第一个列表值
+                for value in data.values():
                     if isinstance(value, list):
                         self.outline = value
                         break
+                else:
+                    raise ValueError("返回的JSON中未找到列表")
+            else:
+                raise ValueError("返回的数据格式异常")
             
             if not self.outline:
-                raise ValueError("未找到有效的大纲列表")
+                raise ValueError("大纲列表为空")
 
             print(f"✅ 大纲已生成: {self.outline}")
 
@@ -79,38 +100,42 @@ class LongArticleAgent:
 
         # 初始化上下文摘要
         previous_summary = "文章开始。"
-        
+    
         print("\n🚀 开始撰写正文...")
         for i, chapter in enumerate(self.outline):
             print(f"[{i+1}/{len(self.outline)}] 正在撰写: {chapter}...")
-            
-            # TODO: 构造 Prompt，核心在于 Context 的注入
+        
+        # 构造 Prompt，核心在于 Context 的注入
             prompt = f"""
-            你是一位专业作家。请撰写章节："{chapter}"。
-            
-            【前情提要】：
-            {previous_summary}
-            
-            要求：
-            1. 内容充实，字数约 300 字。
-            2. 必须承接【前情提要】的逻辑，不要重复。
-            """
+        你是一位专业作家。请撰写章节："{chapter}"。
+
+        【前情提要】：
+        {previous_summary}
+
+        要求：
+        1. 内容充实，字数约 300 字。
+        2. 必须承接【前情提要】的逻辑，不要重复前文内容。
+        3. 语言流畅，逻辑清晰。
+        """
             
             try:
                 response = client.chat.completions.create(
-                    model=MODEL_NAME,  # 使用配置的模型名
+                    model=MODEL_NAME,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7
+                    temperature=0.7,
+                    max_tokens=800  # 控制输出长度，避免过长
                 )
                 content = response.choices[0].message.content
                 self.articles.append(f"## {chapter}\n\n{content}")
                 
-                # TODO: 更新 Context (核心考察点)
-                # 简单策略：截取最后 200 字
-                previous_summary = content[-200:]
+                # 更新 Context：截取最后 200 字作为下一章的前情提要
+                # 更高级的方法：让模型对本章生成一个摘要，但简单截取也可以
+                previous_summary = content[-200:]  # 取最后200字符，注意是中文字符
                 
             except Exception as e:
                 print(f"⚠️ 章节 {chapter} 生成失败: {e}")
+                # 如果失败，可以选择跳过或使用备选摘要
+                continue
 
     def save_result(self):
         if not self.articles:
